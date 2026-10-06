@@ -5,6 +5,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { useConfirm } from '@/hooks/use-confirm';
+import { MetadataBootstrapController, settingsReadiness, shouldBootstrap, type BootstrapPhase, type SettingsReadiness } from '@/lib/metadata-bootstrap';
 import { liveRepositories, type CompanionRepositories } from '@/lib/cowork-repositories';
 import { createDemoRepositories } from '@/lib/cowork-demo';
 import { ChangeDetectionService, demoModeOf, emptyMetadata, patchTask, putProject, withAppearance, withDemoMode, type CompanionMetadata, type DriveItem, type MetadataPage, type Project, type TaskPreferences } from '@/lib/cowork-domain';
@@ -31,6 +32,10 @@ export interface CompanionSession {
   setDemoMode: (value: boolean) => Promise<boolean>;
   /** The live (OneDrive) companion metadata query — the only OneDrive access that continues in Demo mode. */
   preferencesQuery: ReturnType<typeof useQuery<MetadataPage>>;
+  /** First-run creation of the live companion file (independent of Demo/Live content mode). */
+  bootstrap: BootstrapPhase;
+  retryBootstrap: () => void;
+  readiness: SettingsReadiness;
   repositories: CompanionRepositories;
   scopeKey: string;
   changes: ChangeDetectionService;
@@ -98,6 +103,18 @@ export function CompanionProvider({ children, repositories: injected }: { childr
   // the mode is known before any Cowork content is read; while saving a change the switch shows the target value optimistically.
   const liveMetadataKey = ['cowork', 'live', 'metadata', metaToken];
   const preferencesQuery = useQuery({ queryKey: liveMetadataKey, queryFn: () => liveRepositories.metadata.load(metaToken), retry: false, staleTime: Infinity, refetchOnWindowFocus: false, enabled: !injected });
+  // Live bootstrap: when the live scan conclusively reports the file absent, create it exactly once through the LIVE
+  // repository — regardless of the effective content mode — and put the created document into the live query cache.
+  const [bootstrapController] = useState(() => new MetadataBootstrapController(liveRepositories.metadata, document => { client.setQueryData<MetadataPage>(['cowork', 'live', 'metadata', undefined], { document }); }));
+  const [bootstrap, setBootstrap] = useState<BootstrapPhase>(() => bootstrapController.state);
+  useEffect(() => bootstrapController.subscribe(() => setBootstrap(bootstrapController.state)), [bootstrapController]);
+  useEffect(() => {
+    if (injected) return;
+    if (preferencesQuery.data?.document) { bootstrapController.observeExisting(); return; }
+    if (shouldBootstrap({ page: preferencesQuery.data, queryStatus: preferencesQuery.status, phase: bootstrapController.state })) void bootstrapController.start();
+  }, [injected, preferencesQuery.data, preferencesQuery.status, bootstrapController]);
+  const retryBootstrap = useCallback(() => { void bootstrapController.retry(); }, [bootstrapController]);
+  const readiness = settingsReadiness({ page: preferencesQuery.data, queryStatus: preferencesQuery.status, queryError: preferencesQuery.error instanceof Error ? preferencesQuery.error.message : undefined, phase: bootstrap });
   const [optimisticDemo, setOptimisticDemo] = useState<boolean>();
   const savedDemoMode = injected ? false : demoModeOf(preferencesQuery.data?.document);
   const demoMode = optimisticDemo ?? savedDemoMode;
@@ -123,10 +140,9 @@ export function CompanionProvider({ children, repositories: injected }: { childr
   const metadataQuery = useQuery({ queryKey: metadataKey, queryFn: () => repositories.metadata.load(metaToken), retry: false, staleTime: Infinity, refetchOnWindowFocus: false, enabled: modeResolved });
   const metadata = metadataQuery.data?.document ?? defaultMetadata;
   const save = useMutation({ mutationFn: (next: CompanionMetadata) => repositories.metadata.save(next), onSuccess: document => client.setQueryData<MetadataPage>(metadataKey, { document }) });
-  const initialize = useMutation({ mutationFn: () => repositories.metadata.initialize(emptyMetadata()), onSuccess: document => client.setQueryData<MetadataPage>(metadataKey, { document }) });
-  const writable = !!metadataQuery.data?.document && !save.isPending && !initialize.isPending && !metadataQuery.isFetching;
-  // The companion file is app-owned: when the Documents scan proves it absent, create it once so pins/projects/archives can be saved.
-  useEffect(() => { if (metadataQuery.data?.absent && !metadataQuery.data.nextToken && initialize.isIdle) initialize.mutate(); }, [metadataQuery.data, initialize]);
+  // Explicit (confirmed) creation from Settings uses the LIVE repository too; the automatic first-run path is the bootstrap controller above.
+  const initialize = useMutation({ mutationFn: () => liveRepositories.metadata.initialize(emptyMetadata()), onSuccess: document => client.setQueryData<MetadataPage>(['cowork', 'live', 'metadata', undefined], { document }) });
+  const writable = !!metadataQuery.data?.document && !save.isPending && !initialize.isPending && bootstrap.status !== 'creating' && !metadataQuery.isFetching;
 
   // One discovery pass reads the whole observable layout. staleTime keeps page navigation from re-reading OneDrive.
   const layoutQuery = useQuery({ queryKey: ['cowork', scopeKey, 'layout', path], queryFn: () => repositories.discovery.discover(path), retry: false, refetchInterval: interval || false, staleTime: interval || 300_000, refetchOnWindowFocus: false, enabled: modeResolved });
@@ -252,7 +268,7 @@ export function CompanionProvider({ children, repositories: injected }: { childr
   const refresh = useCallback(() => { void client.invalidateQueries({ queryKey: ['cowork', scopeKey], predicate: q => !q.queryKey.includes('metadata') && !q.queryKey.includes('text') }); }, [client, scopeKey]);
 
   const value: CompanionSession = {
-    mode, modeResolved, demoMode, setDemoMode, preferencesQuery, repositories, scopeKey, changes, index, observe, metadata, metadataQuery, metaToken, setMetaToken, save, initialize, writable,
+    mode, modeResolved, demoMode, setDemoMode, preferencesQuery, bootstrap, retryBootstrap, readiness, repositories, scopeKey, changes, index, observe, metadata, metadataQuery, metaToken, setMetaToken, save, initialize, writable,
     update, pendingKey, lastResult, runAction, assign, confirmAssign, confirmArchive, taskName, appearance, scheme, setAppearance, fileLinks, createProject, selection, toggleSelection, selectVisible, deselectVisible, clearSelection, markSeen, markAllSeen, createMetadata, path, setPath, interval, setInterval: setIntervalValue, layoutQuery, layout, summaryById, refresh, list, setList,
     outputsView, setOutputsView, expanded, toggleFolder, setExpanded,
   };

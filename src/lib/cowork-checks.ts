@@ -11,6 +11,8 @@ import { FocusReturn, dialogCloseReasons, pillFocusKey } from './focus-return';
 import { AppearanceController, appearanceOf, parseAppearance, resolveScheme, rootClassesFor } from './appearance';
 import { archiveRequest, assignRequest, runConfirmedMutation } from './confirm-mutation';
 import { FileLinkService, linkAccessibleName } from './file-links';
+import { MetadataBootstrapController, settingsReadiness, shouldBootstrap } from './metadata-bootstrap';
+import type { CompanionMetadataRepository, MetadataPage } from './cowork-domain';
 import { assignTasks, assignmentSummary, createProjectAndAssign, deselectAll, pruneSelection, selectAll, toggleSelected, validateCoworkTaskUrl, visibleSelectionState } from './cowork-assignment';
 import { skeletonSpec } from '../components/cowork-skeletons';
 import type { TaskFile, TaskFolder } from './cowork-discovery';
@@ -450,6 +452,56 @@ export async function runCoworkChecks() {
   links.retry(linkItems[3]); await new Promise(r => setTimeout(r, 20));
   assert(links.state('denied').status === 'unavailable' && linkAccessibleName({ Name: 'proposal.docx' }) === 'Open proposal.docx in a new tab', 'Retry re-resolves through the repository; accessible names name the file.');
   passed.push('filename links: exact URL, pending/unavailable states, bounded concurrency, retry, accessible name');
+
+  // Fresh tenant: live companion file absent while the effective mode is Demo → exactly one LIVE initialize; no live content reads.
+  class FakeLiveMetadata implements CompanionMetadataRepository {
+    readonly location = '/Documents/cowork-companion.json';
+    counters = { initializes: 0, saves: 0 }; failInitialize = false; stored?: CompanionMetadata;
+    get initializes() { return this.counters.initializes; } get saves() { return this.counters.saves; }
+    async load(): Promise<MetadataPage> { return this.stored ? { document: structuredClone(this.stored) } : { absent: true }; }
+    async initialize(document: CompanionMetadata) { this.counters.initializes++; if (this.failInitialize) throw new Error('OneDrive create failed: HTTP 423'); if (this.stored) throw new Error('must not overwrite an existing file'); this.stored = parseMetadata(serializeMetadata(document)); return structuredClone(this.stored); }
+    async save(document: CompanionMetadata) { this.counters.saves++; this.stored = parseMetadata(serializeMetadata(document)); return structuredClone(this.stored); }
+  }
+  const liveMeta = new FakeLiveMetadata();
+  const liveCache: { page?: MetadataPage } = { page: await liveMeta.load() };
+  const liveContentCalls: string[] = [];
+  const liveContent: CoworkTaskRepository = { get: async () => { liveContentCalls.push('get'); throw new Error('x'); }, resolve: async () => { liveContentCalls.push('resolve'); throw new Error('x'); }, list: async () => { liveContentCalls.push('list'); throw new Error('x'); }, read: async () => { liveContentCalls.push('read'); throw new Error('x'); }, open: async () => { liveContentCalls.push('open'); throw new Error('x'); }, search: async () => { liveContentCalls.push('search'); throw new Error('x'); } };
+  // The content bundle for the effective mode: Demo → in-memory; Live → the spy repository that must stay untouched until Demo is saved off.
+  const liveContentBundle = createRepositories(liveContent, liveMeta);
+  const effectiveMode = () => (demoModeOf(liveCache.page?.document) ? 'demo' : 'live');
+  const effectiveBundle = () => (effectiveMode() === 'demo' ? createDemoRepositories() : liveContentBundle);
+  await effectiveBundle().discovery.discover('/Documents/Cowork');
+  assert(liveCache.page?.absent === true && effectiveMode() === 'demo', 'A fresh tenant has no live file and defaults to Demo mode.');
+  assert(shouldBootstrap({ page: liveCache.page, queryStatus: 'success', phase: { status: 'idle' } }) && !shouldBootstrap({ page: { absent: true, nextToken: 'more' }, queryStatus: 'success', phase: { status: 'idle' } }) && !shouldBootstrap({ page: liveCache.page, queryStatus: 'pending', phase: { status: 'idle' } }) && !shouldBootstrap({ page: { document: emptyMetadata() }, queryStatus: 'success', phase: { status: 'idle' } }), 'Bootstrap starts only on a conclusive absent scan with nothing started.');
+  assert(settingsReadiness({ page: liveCache.page, queryStatus: 'success', phase: { status: 'idle' } }).kind === 'creating' && settingsReadiness({ page: undefined, queryStatus: 'pending', phase: { status: 'idle' } }).kind === 'checking' && settingsReadiness({ page: { absent: true, nextToken: 't' }, queryStatus: 'success', phase: { status: 'idle' } }).kind === 'scan-incomplete' && settingsReadiness({ page: undefined, queryStatus: 'error', queryError: 'HTTP 403', phase: { status: 'idle' } }).kind === 'load-failed', 'Settings readiness distinguishes checking, creating, scan-incomplete and a real load failure.');
+  const bootstrapCtl = new MetadataBootstrapController(liveMeta, document => { liveCache.page = { document }; });
+  // Strict Mode / re-render: three simultaneous starts → one initialize.
+  const [b1, b2, b3] = await Promise.all([bootstrapCtl.start(), bootstrapCtl.start(), bootstrapCtl.start()]);
+  assert(b1.status === 'created' && b2 === b1 && b3 === b1 && liveMeta.initializes === 1, 'Concurrent effect runs produce exactly one live initialize.');
+  assert((await bootstrapCtl.start()).status === 'created' && liveMeta.initializes === 1, 'A later start after success never initializes again.');
+  assert(liveCache.page?.document !== undefined && !liveCache.page.absent && demoModeOf(liveCache.page.document) === true && effectiveMode() === 'demo', 'The created document lands in the live query cache; missing preference still means Demo mode.');
+  assert(settingsReadiness({ page: liveCache.page, queryStatus: 'success', phase: bootstrapCtl.state }).kind === 'ready' && !(settingsReadiness({ page: liveCache.page, queryStatus: 'success', phase: bootstrapCtl.state }) as { saved: boolean }).saved, 'Settings is ready with no saved preference after creation — the switch is enabled.');
+  await effectiveBundle().discovery.discover('/Documents/Cowork');
+  assert(liveContentCalls.length === 0 && effectiveBundle() !== liveContentBundle, 'Bootstrapping the metadata file performs no live Cowork content read; content stays on the demo bundle.');
+  // Saving Demo mode off writes to the LIVE repository; only then does the effective mode (and content repository) switch.
+  const savedLive = await liveMeta.save(withDemoMode(liveCache.page.document!, false)); liveCache.page = { document: savedLive };
+  assert(liveMeta.saves === 1 && demoModeOf(liveMeta.stored) === false && effectiveMode() === 'live' && effectiveBundle() === liveContentBundle && liveContentCalls.length === 0, 'Saving Demo mode off persists to the live file and only then selects the live content bundle; no content read happened before the explicit save.');
+  // Existing file is never initialized again.
+  const existingController = new MetadataBootstrapController(liveMeta); existingController.observeExisting();
+  assert(!shouldBootstrap({ page: await liveMeta.load(), queryStatus: 'success', phase: existingController.state }) && liveMeta.initializes === 1, 'An existing live file is never initialized again.');
+  // Initialization failure surfaces explicitly and retry works; nothing is silently fallen back to.
+  const failingMeta = new FakeLiveMetadata(); failingMeta.failInitialize = true;
+  const failCache: { page?: MetadataPage } = { page: { absent: true } };
+  const failing = new MetadataBootstrapController(failingMeta, document => { failCache.page = { document }; });
+  const failed = await failing.start();
+  assert(failed.status === 'failed' && failed.message.includes('423') && failCache.page?.absent === true && settingsReadiness({ page: failCache.page, queryStatus: 'success', phase: failing.state }).kind === 'create-failed', 'A failed creation is reported with the connector reason and the cache stays absent.');
+  const afterFailure = await failing.start(); const initializesAfterFailure: number = failingMeta.initializes;
+  assert(afterFailure.status === 'failed' && initializesAfterFailure === 1, 'A failed bootstrap does not auto-retry on re-render.');
+  failingMeta.failInitialize = false;
+  const retried = await failing.retry();
+  const initializesAfterRetry: number = failingMeta.initializes;
+  assert(retried.status === 'created' && initializesAfterRetry === 2 && failCache.page?.document !== undefined, 'An explicit retry creates the file and updates the cache.');
+  passed.push('fresh-tenant live bootstrap: exactly one live initialize while Demo is active, cache update, no content reads, failure + retry, existing file untouched, Demo off persists to live');
   passed.push('direct Open flow: link first, sandbox/popup block keeps link, distinct connector failure, no blank tab');
   return { passed: passed.length, checks: passed };
 }

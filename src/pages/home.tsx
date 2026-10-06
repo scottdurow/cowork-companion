@@ -68,8 +68,9 @@ export function HomePage() {
   useOverflowGuard(`${route.kind}:${route.kind === 'task' ? route.taskId : route.kind === 'section' ? route.section : ''}`);
   const confirm = useConfirm();
   const session = useCompanion();
-  const { mode, modeResolved, demoMode, setDemoMode, preferencesQuery, fileLinks, appearance, setAppearance, repositories, scopeKey, changes, index, observe, metadata, metadataQuery, metaToken, setMetaToken, save, initialize, writable, markSeen, createMetadata, path, setPath, interval, setInterval: setIntervalValue, layoutQuery, layout, summaryById, refresh, list, setList, selection, toggleSelection, selectVisible, deselectVisible, clearSelection, assign, createProject, pendingKey, lastResult } = session;
+  const { mode, modeResolved, demoMode, setDemoMode, preferencesQuery, bootstrap, retryBootstrap, readiness, fileLinks, appearance, setAppearance, repositories, scopeKey, changes, index, observe, metadata, metadataQuery, metaToken, setMetaToken, save, initialize, writable, markSeen, createMetadata, path, setPath, interval, setInterval: setIntervalValue, layoutQuery, layout, summaryById, refresh, list, setList, selection, toggleSelection, selectVisible, deselectVisible, clearSelection, assign, createProject, pendingKey, lastResult } = session;
   const { search, taskFilter, projectFilter, sort, memoryFilter, activityUnseen } = list;
+  const liveLocation = '/Documents/cowork-companion.json';
   const section: Section | undefined = route.kind === 'section' ? route.section : undefined;
   const setSearch = (next: string) => setList({ search: next });
   const setTaskFilter = (next: string) => setList({ taskFilter: next as typeof taskFilter });
@@ -324,7 +325,7 @@ export function HomePage() {
           </div>
           <div className="fl-card space-y-2 p-4">
             <h3 className="font-semibold">Companion metadata</h3>
-            <p className="truncate text-xs" title={repositories.metadata.location}>{repositories.metadata.location}</p>
+            <p className="truncate text-xs" title={liveLocation}>{liveLocation}{mode === 'demo' ? ' (preferences) · content: Demo sample' : ''}</p>
             <p className="text-xs text-muted-foreground">Schema 2 stores project IDs/names/colors, stable task IDs with assignment, pin, archive and saved URL, and seen-change fingerprints. No source filenames or timestamps are copied. Only this app-owned file is written; reload before using another window.</p>
             {metadataQuery.isPending && <p role="status" className="text-xs">Checking companion settings…</p>}
             {metadataQuery.isError && <ErrorState title="Companion settings could not load" description={metadataQuery.error instanceof Error ? metadataQuery.error.message : undefined} action={<Button size="sm" onClick={() => void metadataQuery.refetch()}>Retry</Button>} className="py-4" />}
@@ -332,7 +333,7 @@ export function HomePage() {
             {initialize.isError && <p role="alert" className="text-xs text-destructive">{initialize.error instanceof Error ? initialize.error.message : 'The companion file could not be created.'}</p>}
             <Paging previous={metaPrevious.length > 0} next={!!metadataQuery.data?.nextToken} busy={metadataQuery.isFetching} onPrevious={() => { setMetaToken(metaPrevious.at(-1)); setMetaPrevious(p => p.slice(0, -1)); }} onNext={() => { setMetaPrevious(p => [...p, metaToken]); setMetaToken(metadataQuery.data?.nextToken); }} />
             <div className="flex flex-wrap items-center gap-2">
-              {metadataQuery.data?.absent && !initialize.isPending && <Button size="sm" className="fl-focus" onClick={() => void createMetadata()}>Create settings file</Button>}
+              {preferencesQuery.data?.absent && !preferencesQuery.data.nextToken && bootstrap.status === 'failed' && !initialize.isPending && <Button size="sm" className="fl-focus" onClick={() => void createMetadata()}>Create settings file</Button>}
               <Button variant="outline" size="sm" className="fl-focus" disabled={save.isPending || initialize.isPending} onClick={() => void metadataQuery.refetch()}>Reload</Button>
               {metadataQuery.data?.document && <span className="fl-badge">Loaded · schema {metadata.schemaVersion} · {metadata.projects.length} projects · {Object.keys(metadata.tasks).length} tasks</span>}
               {save.isSuccess && <span role="status" className="text-xs text-muted-foreground">Last change saved.</span>}
@@ -359,8 +360,14 @@ export function HomePage() {
               </div>
               <ActionStatus actionKey="demo-mode" pendingKey={pendingKey} lastResult={lastResult} size="size-5" />
             </div>
-            {!preferencesQuery.data?.document && modeResolved && <p role="alert" className="mt-1 h-4 truncate text-xs text-destructive">Companion settings are unavailable, so Demo mode stays on and the choice cannot be saved.</p>}
-            {(preferencesQuery.data?.document || !modeResolved) && <p className="mt-1 h-4 truncate text-xs text-muted-foreground">{!modeResolved ? 'Checking saved preference…' : preferencesQuery.data?.document?.preferences?.demoMode === undefined ? 'No saved preference yet; Demo mode is the default until you change it.' : `Saved preference: Demo mode ${demoMode ? 'on' : 'off'}.`}</p>}
+            <div className="mt-1 flex h-4 min-w-0 items-center gap-2 text-xs">
+              {readiness.kind === 'checking' && <p role="status" aria-live="polite" className="truncate text-muted-foreground">Checking saved preference…</p>}
+              {readiness.kind === 'creating' && <p role="status" aria-live="polite" className="flex min-w-0 items-center gap-1.5 text-muted-foreground"><Spinner className="size-3 shrink-0" role="presentation" aria-label={undefined} aria-hidden="true" /><span className="truncate">First run: creating {liveLocation}…</span></p>}
+              {readiness.kind === 'scan-incomplete' && <p className="truncate text-muted-foreground">Finish checking the Documents folder (Companion metadata, above) before the settings file is created.</p>}
+              {readiness.kind === 'ready' && <p className="truncate text-muted-foreground">{readiness.saved ? `Saved preference: Demo mode ${demoMode ? 'on' : 'off'}.` : bootstrap.status === 'created' ? 'Settings file created. No saved preference yet; Demo mode is the default until you change it.' : 'No saved preference yet; Demo mode is the default until you change it.'}</p>}
+              {readiness.kind === 'create-failed' && <><p role="alert" className="min-w-0 truncate text-destructive" title={readiness.message}>Couldn’t create {liveLocation}: {readiness.message}</p><Button size="xs" variant="outline" className="fl-focus shrink-0" onClick={retryBootstrap}>Retry</Button></>}
+              {readiness.kind === 'load-failed' && <><p role="alert" className="min-w-0 truncate text-destructive" title={readiness.message}>Couldn’t read {liveLocation}: {readiness.message}</p><Button size="xs" variant="outline" className="fl-focus shrink-0" onClick={() => void preferencesQuery.refetch()}>Retry</Button></>}
+            </div>
           </div>
         </section>}
       </main>
