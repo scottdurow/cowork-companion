@@ -36,6 +36,7 @@ import type { CompanionRepositories } from '@/lib/cowork-repositories';
 import { useCompanion } from '@/lib/companion-session';
 import { searchLocalFiles } from '@/lib/cowork-workspace';
 import { ChangeDetectionService, deleteProject, projectColors, classify, compareText, validatedCoworkUrl, type DriveItem, type Project, type CompanionMetadata, type SkillsRepository } from '@/lib/cowork-domain';
+import { APP_DISPLAY_NAME, APP_NAME, APP_RELEASE_VERSION, versionAccessibleName, versionStamp } from '@/lib/app-version';
 
 const navIcons: Record<Section, typeof Home> = { dashboard: Home, tasks: Files, projects: Layers, skills: BookOpen, memory: Brain, archived: Archive, settings: Settings };
 const navigation = sections.map(section => ({ section, label: sectionLabels[section], icon: navIcons[section] }));
@@ -64,6 +65,9 @@ function describeChange(item: DriveItem, taskPaths: string[]) {
 // Data, metadata and list state come from the shared Companion session so a task page visit and Back
 // return to exactly this list state without re-reading OneDrive.
 export function HomePage() {
+  useEffect(() => {
+    document.title = APP_DISPLAY_NAME;
+  }, []);
   // The URL hash is the only route state: sections, the task page and not-found all derive from it.
   const { route, back, hasHistory } = useHashRoute();
   useOverflowGuard(`${route.kind}:${route.kind === 'task' ? route.taskId : route.kind === 'section' ? route.section : ''}`);
@@ -181,11 +185,11 @@ export function HomePage() {
   function NavItems() { return <>{navigation.map(({ section: target }) => <NavLink key={target} target={target} />)}</>; }
 
   // Stable shell: header and left nav are sized by the host, never by route content; only the content column scrolls.
-  return <div className="companion-shell flex h-full min-h-0 flex-col">
+  return <div className="companion-shell flex h-full min-h-0 flex-col" data-app-release={APP_DISPLAY_NAME}>
     <a href="#companion-content" className="sr-only rounded bg-card p-2 focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-50">Skip to content</a>
     <header className="z-20 shrink-0 border-b bg-card">
       <div className="mx-auto flex h-12 w-full max-w-[1400px] items-center gap-3 px-3">
-        <div className="flex min-w-0 shrink items-center gap-2"><span aria-hidden="true" className="grid size-7 shrink-0 place-items-center rounded-md bg-primary text-primary-foreground"><Layers className="size-4" /></span><h1 className="truncate text-base font-semibold tracking-tight">Cowork Companion</h1></div>
+        <div className="flex min-w-0 shrink items-center gap-2"><span aria-hidden="true" className="grid size-7 shrink-0 place-items-center rounded-md bg-primary text-primary-foreground"><Layers className="size-4" /></span><h1 className="truncate text-base font-semibold tracking-tight">{APP_NAME}</h1><span className="fl-badge shrink-0 font-mono text-[10px]" data-app-version={APP_RELEASE_VERSION} aria-label={versionAccessibleName(APP_RELEASE_VERSION)} title={versionAccessibleName(APP_RELEASE_VERSION)}>{versionStamp(APP_RELEASE_VERSION)}</span></div>
         <div className="relative mx-auto hidden w-full max-w-md sm:block"><Search aria-hidden="true" className="pointer-events-none absolute left-2.5 top-2 size-4 text-muted-foreground" /><Input aria-label="Search tasks, projects, files, or skills" className="h-8 border-transparent bg-muted pl-8 focus-visible:border-input focus-visible:bg-card" placeholder="Search tasks, files, or projects…" value={search} onChange={e => setSearch(e.target.value)} /></div>
         <div className="ml-auto flex shrink-0 items-center gap-1">
           {mode === 'demo' && <span className="fl-badge fl-badge-warning shrink-0" title="Demo mode: built-in sample content held in memory. Nothing shown comes from OneDrive." aria-label="Demo mode: sample content, not OneDrive"><span className="sm:hidden">Demo</span><span className="hidden sm:inline">Demo mode · sample content</span></span>}
@@ -343,6 +347,10 @@ export function HomePage() {
             <Label htmlFor="refresh-interval">Automatic refresh</Label><select id="refresh-interval" className="fl-focus block h-8 rounded-md border bg-card px-2 text-sm" value={interval} onChange={e => setIntervalValue(Number(e.target.value))}><option value="0">Manual only</option><option value="60000">Every minute</option><option value="300000">Every 5 minutes</option><option value="900000">Every 15 minutes</option></select>
             <p className="text-xs text-muted-foreground">Refresh is incremental: it re-reads the root and task listings and inspects only folders whose OneDrive metadata changed. Your view, filters and selection are kept.</p>
           </div>
+          <div className="fl-card space-y-1 p-4">
+            <h3 className="font-semibold">About</h3>
+            <p className="text-xs text-muted-foreground">App: {APP_DISPLAY_NAME} · managed-app release version</p>
+          </div>
           <div className="fl-card space-y-2 p-4">
             <h3 className="font-semibold">Cached data</h3>
             <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
@@ -495,4 +503,3 @@ function SkillExploration({ folder, repository, files, scopeKey }: { folder: Dri
     {['deactivate', 'reactivate', 'duplicate'].includes(action) && <p className="text-xs">{action === 'duplicate' ? 'Duplicate exploration requires known Cowork folder and skill-identity rules.' : `${action} exploration requires documented Cowork activation semantics.`} These semantics are not exposed. This control is a read-only extension point; it never edits, copies, moves, or deletes a skill.</p>}
   </section>;
 }
-

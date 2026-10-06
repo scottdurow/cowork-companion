@@ -2,6 +2,8 @@
 
 Cowork Companion is a lightweight navigator for Microsoft Copilot Cowork content stored in OneDrive. It discovers observable task, skill, memory, input, and output files under `/Documents/Cowork` and adds app-owned organization without changing Cowork's folders.
 
+The current managed-app release is **v1.0.0**. The product release is defined once in `src/lib/app-version.ts`; the protected scaffold version in `package.json` is tooling metadata and is not the deployed product version.
+
 ## Features
 
 - Task dashboard with recent-change indicators, pinning, archiving, and virtual projects

@@ -5,11 +5,12 @@
 import { Window } from 'happy-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ConfirmContext } from '@/hooks/use-confirm';
+import { APP_DISPLAY_NAME, APP_RELEASE_VERSION, versionAccessibleName, versionStamp } from '@/lib/app-version';
 import type { ReactElement } from 'react';
 
 type Dom = { window: Window; dispose: () => void };
-function installDom(width: number, hash: string): Dom {
-  const window = new Window({ url: `https://preview.local/app/${hash}`, width, height: 800 });
+function installDom(width: number, hash: string, height = 800): Dom {
+  const window = new Window({ url: `https://preview.local/app/${hash}`, width, height });
   const g = globalThis as unknown as Record<string, unknown>;
   const keys = ['window', 'document', 'navigator', 'HTMLElement', 'Element', 'Node', 'Event', 'CustomEvent', 'KeyboardEvent', 'MouseEvent', 'FocusEvent', 'PointerEvent', 'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame', 'localStorage', 'sessionStorage', 'history', 'location', 'MutationObserver', 'DOMRect', 'Text', 'HTMLInputElement', 'HTMLButtonElement', 'HTMLAnchorElement', 'SVGElement', 'DocumentFragment', 'ResizeObserver', 'matchMedia'];
   const previous = new Map<string, unknown>();
@@ -29,8 +30,8 @@ export async function runRenderChecks(): Promise<{ passed: number; report: Rende
   const pass = (name: string, detail: string) => report.push({ name, detail });
 
   // Imports happen after the DOM exists so module-level `window` reads (hash routing, storage) see happy-dom.
-  const scenario = async (opts: { width: number; hash: string; tasks: number; label: string; afterSettle?: (ctx: { window: Window; commits: () => number; repo: InstanceType<Awaited<typeof checks>['CountingRepository']>; engineCalls: () => Record<string, number> }) => Promise<string> }) => {
-    const dom = installDom(opts.width, opts.hash);
+  const scenario = async (opts: { width: number; height?: number; hash: string; tasks: number; label: string; afterSettle?: (ctx: { window: Window; commits: () => number; repo: InstanceType<Awaited<typeof checks>['CountingRepository']>; engineCalls: () => Record<string, number> }) => Promise<string> }) => {
+    const dom = installDom(opts.width, opts.hash, opts.height);
     try {
       const React = await import('react');
       const { createRoot } = await import('react-dom/client');
@@ -73,7 +74,7 @@ export async function runRenderChecks(): Promise<{ passed: number; report: Rende
         if (repo.count() !== settledCalls || commits - settledCommits > 3) throw new Error(`${opts.label}: post-settle re-render caused ${commits - settledCommits} commits and ${repo.count() - settledCalls} connector calls`);
         const extra = opts.afterSettle ? await opts.afterSettle({ window: dom.window, commits: () => commits, repo, engineCalls: () => repo.calls.reduce<Record<string, number>>((acc, c) => { acc[c.op] = (acc[c.op] ?? 0) + 1; return acc; }, {}) }) : '';
         if (errors.length) throw new Error(`${opts.label}: ${errors[0]}`);
-        return { commits, extra, repoCalls: repo.count(), html: (container as unknown as HTMLElement).innerHTML };
+        return { commits, extra, repoCalls: repo.count(), html: (container as unknown as HTMLElement).innerHTML, title: dom.window.document.title };
       } finally { console.error = origError; await act(async () => { root.unmount(); }); client.clear(); }
     } finally { dom.dispose(); }
   };
@@ -98,6 +99,21 @@ export async function runRenderChecks(): Promise<{ passed: number; report: Rende
   pass('skills route settles', `${skills.commits} commits; ${skills.extra}`);
   const memory = await scenario({ width: 1200, hash: '#/memory', tasks: 4, label: 'memory route', afterSettle: async ({ repo }) => { const listed = repo.listed('memory'); if (listed !== 1) throw new Error(`memory container listed ${listed}×`); return `memory container listed ${listed}×`; } });
   pass('memory route settles', `${memory.commits} commits; ${memory.extra}`);
+
+  // 6. Release identity remains visible and accessible at the reduced production viewport.
+  const release = await scenario({ width: 800, height: 600, hash: '#/dashboard', tasks: 4, label: 'release stamp' });
+  const releaseDom = installDom(800, '#/dashboard', 600);
+  try {
+    releaseDom.window.document.body.innerHTML = release.html;
+    const stamp = releaseDom.window.document.querySelector('[data-app-version]');
+    if (!stamp || stamp.textContent !== versionStamp(APP_RELEASE_VERSION)) throw new Error('release stamp is missing or incorrect');
+    if (stamp.getAttribute('aria-label') !== versionAccessibleName(APP_RELEASE_VERSION)) throw new Error('release stamp accessible name is incorrect');
+    if (stamp.getAttribute('title') !== versionAccessibleName(APP_RELEASE_VERSION)) throw new Error('release stamp title is incorrect');
+    if (stamp.hasAttribute('hidden') || stamp.classList.contains('hidden')) throw new Error('release stamp is hidden at 800px');
+    if (releaseDom.window.document.querySelector('[data-app-release]')?.getAttribute('data-app-release') !== APP_DISPLAY_NAME) throw new Error('release marker is missing or incorrect');
+    if (release.title !== APP_DISPLAY_NAME) throw new Error('document title is missing or incorrect');
+  } finally { releaseDom.dispose(); }
+  pass('release stamp remains visible', `${versionStamp(APP_RELEASE_VERSION)} is rendered and accessible at 800×600`);
 
   return { passed: report.length, report };
 }
