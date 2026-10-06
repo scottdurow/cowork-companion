@@ -273,7 +273,8 @@ export function CompanionProvider({ children, repositories: injected }: { childr
     return runConfirmedMutation(archiveRequest(taskName(taskId) ?? taskId), origin, { confirm, perform: () => runAction(`archive:${taskId}`, () => patchTask(metadata, taskId, { archived: true })), isBusy: () => !!pendingKey, focusReturn: mutationFocus, resolveByKey: k => resolveFocusKey(k), fallback: () => document.getElementById('companion-content'), defer: deferToFrame });
   }, [taskName, confirm, runAction, metadata, pendingKey, mutationFocus]);
 
-  const refresh = useCallback(() => { void sync.refresh(); void client.invalidateQueries({ queryKey: ['cowork', scopeKey], predicate: q => !q.queryKey.includes('metadata') && !q.queryKey.includes('text') && !q.queryKey.includes('layout') }); }, [sync, client, scopeKey]);
+  const syncRefresh = sync.refresh; // stable per engine; the handle itself changes on every engine emit
+  const refresh = useCallback(() => { void syncRefresh(); void client.invalidateQueries({ queryKey: ['cowork', scopeKey], predicate: q => !q.queryKey.includes('metadata') && !q.queryKey.includes('text') && !q.queryKey.includes('layout') }); }, [syncRefresh, client, scopeKey]);
 
   const value: CompanionSession = {
     mode, modeResolved, demoMode, setDemoMode, preferencesQuery, bootstrap, retryBootstrap, readiness, repositories, scopeKey, changes, index, observe, metadata, metadataQuery, metaToken, setMetaToken, save, initialize, writable,

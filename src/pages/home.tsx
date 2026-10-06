@@ -151,10 +151,13 @@ export function HomePage() {
   const showTasks = section === 'dashboard' || section === 'tasks' || section === 'archived';
   // Progressive priorities: pinned + visible task shells are inspected first (bounded concurrency in the engine); Skills and
   // Memory are discovered only when their route opens (or in the engine's low-priority idle slot) — the dashboard never waits for them.
+  // Effects depend only on stable engine actions and primitive keys — never on the `sync` handle or `layout` objects, which change on every engine emit.
+  const { prioritizeTasks, ensureSkills, ensureMemory } = sync;
+  const hasLayout = !!layout;
   const priorityIds = showTasks ? [...pinnedTasks, ...visibleTasks].slice(0, 40).map(i => i.Id).join('|') : '';
-  useEffect(() => { if (priorityIds) sync.prioritizeTasks(priorityIds.split('|')); }, [sync, priorityIds]);
-  useEffect(() => { if (layout && section === 'skills') void sync.ensureSkills(); }, [sync, layout, section]);
-  useEffect(() => { if (layout && section === 'memory') void sync.ensureMemory(); }, [sync, layout, section]);
+  useEffect(() => { if (priorityIds) prioritizeTasks(priorityIds.split('|')); }, [prioritizeTasks, priorityIds]);
+  useEffect(() => { if (hasLayout && section === 'skills') void ensureSkills(); }, [ensureSkills, hasLayout, section]);
+  useEffect(() => { if (hasLayout && section === 'memory') void ensureMemory(); }, [ensureMemory, hasLayout, section]);
   const [rescanBusy, setRescanBusy] = useState<'rescan' | 'clear'>();
   const runFullRescan = async () => {
     if (rescanBusy || !(await confirm({ title: 'Rescan every Cowork folder?', description: 'Re-reads every task, skill and memory folder from OneDrive, ignoring the browser cache. Cached content stays visible while it runs; on a large folder this can take several minutes.', confirmLabel: 'Full rescan' }))) return;

@@ -66,7 +66,16 @@ export function useSyncEngine(repositories: CompanionRepositories, options: { pe
     return () => window.clearInterval(timer);
   }, [engine, enabled, intervalMs]);
 
-  const refresh = useCallback(() => engine.refresh(), [engine]);
+  // Action references are stable for the engine's lifetime so effects can depend on them without re-running (and re-emitting) per render.
+  const actions = useMemo(() => ({
+    refresh: () => engine.refresh(),
+    prioritizeTasks: (ids: Iterable<string>) => engine.prioritize(ids),
+    hydrateTask: (id: string) => engine.hydrateTask(id),
+    ensureSkills: () => engine.ensureSkills(),
+    ensureMemory: () => engine.ensureMemory(),
+    fullRescan: () => engine.fullRescan(),
+    clearCache: () => engine.clearCache(),
+  }), [engine]);
   const { status, layout } = snap;
   const fetching = status.phase !== 'idle' || status.pendingHydration > 0;
   const layoutQuery = useMemo<LayoutState>(() => ({
@@ -76,16 +85,8 @@ export function useSyncEngine(repositories: CompanionRepositories, options: { pe
     error: !layout && (status.rootError || status.error) ? new Error(status.rootError ?? status.error) : null,
     isFetching: fetching,
     dataUpdatedAt: status.lastSyncedAt ? Date.parse(status.lastSyncedAt) : 0,
-    refetch: refresh,
-  }), [layout, status, enabled, fetching, refresh]);
-
-  return {
-    status, metrics: engine.metrics, layout, layoutQuery, refresh,
-    prioritizeTasks: useCallback((ids: Iterable<string>) => engine.prioritize(ids), [engine]),
-    hydrateTask: useCallback((id: string) => engine.hydrateTask(id), [engine]),
-    ensureSkills: useCallback(() => engine.ensureSkills(), [engine]),
-    ensureMemory: useCallback(() => engine.ensureMemory(), [engine]),
-    fullRescan: useCallback(() => engine.fullRescan(), [engine]),
-    clearCache: useCallback(() => engine.clearCache(), [engine]),
-  };
+    refetch: actions.refresh,
+  }), [layout, status, enabled, fetching, actions]);
+  // The handle changes identity only when the engine emitted (status/layout) — never merely because the consumer re-rendered.
+  return useMemo<SyncHandle>(() => ({ status, metrics: engine.metrics, layout, layoutQuery, ...actions }), [status, layout, layoutQuery, actions, engine]);
 }

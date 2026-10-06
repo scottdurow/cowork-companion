@@ -30,7 +30,9 @@ export function TaskPage({ taskId, listSection, onBack, hasHistory, onCreateProj
   // Opening a task is a priority-0 hydration in the sync engine: the task folder and its role folders are validated at the nearest
   // boundary (unchanged leaf folders reused by fingerprint), deduplicated with any queued work, ≤3 connector calls in flight.
   const { sync } = session;
-  useEffect(() => { if (task) void sync.hydrateTask(taskId); }, [sync, taskId, task]);
+  const { hydrateTask } = sync; // stable per engine
+  const hasTask = !!task;
+  useEffect(() => { if (hasTask) void hydrateTask(taskId); }, [hydrateTask, taskId, hasTask]);
   const taskIssues = useMemo(() => (layout?.issues ?? []).filter(i => task && normalizePath(i.path).toLowerCase().startsWith(normalizePath(task.Path).toLowerCase())), [layout, task]);
   const inspecting = !!task && !summary?.inspected && taskIssues.length === 0;
   const taskError = !!task && !summary?.inspected && taskIssues.find(i => i.scope === 'task');

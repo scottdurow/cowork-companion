@@ -214,7 +214,20 @@ export class CoworkSyncEngine {
 
   // ---- Task hydration (prioritised, deduplicated, bounded) ------------------------------------------------------------------
   /** UI hint: these task ids are visible/pinned — hydrate them before the rest. */
-  prioritize(ids: Iterable<string>) { for (const id of ids) if (this.needsHydration(id)) this.enqueue(id, 1, 'fingerprint'); }
+  /** Visible/pinned shells move to priority 1. A request that changes nothing (already hydrated, in flight, or already at ≥ this priority) emits nothing — a React effect may call this on every render without feeding back into state. */
+  prioritize(ids: Iterable<string>) {
+    let changed = false;
+    for (const id of ids) {
+      if (!this.needsHydration(id) || this.inflight.has(id)) continue;
+      const existing = this.queue.find(q => q.id === id);
+      if (existing) { if (existing.priority > 1) { existing.priority = 1; changed = true; } }
+      else { this.queue.push({ id, priority: 1, mode: 'fingerprint' }); changed = true; }
+    }
+    if (!changed) return;
+    this.queue.sort((a, b) => a.priority - b.priority);
+    this.emit();
+    this.pump();
+  }
   /** Selected task: hydrate immediately, validating the nearest cached folder boundaries (direct listings) rather than trusting a parent timestamp. */
   hydrateTask(id: string) { if (!this.outline?.shells.some(s => s.folder.Id === id)) return Promise.resolve(); return this.enqueue(id, 0, this.tasks.get(id) ? 'boundary' : 'fingerprint'); }
   private needsHydration(id: string) { const snap = this.tasks.get(id); return !snap || !!snap.summary.stale; }
@@ -222,12 +235,14 @@ export class CoworkSyncEngine {
     const running = this.inflight.get(id);
     if (running) return running;
     const existing = this.queue.find(q => q.id === id);
-    if (existing) { existing.priority = Math.min(existing.priority, priority) as Priority; if (mode === 'force' || (mode === 'boundary' && existing.mode === 'fingerprint')) existing.mode = mode; }
+    let changed = false;
+    if (existing) {
+      if (priority < existing.priority) { existing.priority = priority; changed = true; }
+      if (mode === 'force' || (mode === 'boundary' && existing.mode === 'fingerprint')) { if (existing.mode !== mode) changed = true; existing.mode = mode; }
+    }
     else if (mode === 'fingerprint' && !this.needsHydration(id)) return Promise.resolve();
-    else this.queue.push({ id, priority, mode });
-    this.queue.sort((a, b) => a.priority - b.priority);
-    this.emit();
-    this.pump();
+    else { this.queue.push({ id, priority, mode }); changed = true; }
+    if (changed) { this.queue.sort((a, b) => a.priority - b.priority); this.emit(); this.pump(); }
     return new Promise(resolve => { const check = () => { if (!this.queue.some(q => q.id === id) && !this.inflight.has(id)) { unsubscribe(); resolve(); } }; const unsubscribe = this.subscribe(check); check(); });
   }
   private pump() {
