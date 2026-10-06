@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Archive, ArrowLeft, Check, ChevronDown, ChevronRight, FileOutput, Folder, FolderOpen, List, ListTree, Pin } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -8,11 +8,11 @@ import { useFileLinks } from '@/components/cowork-file-link';
 import { EmptyState, ErrorState } from '@/components/states';
 import { ago, isRecent, modified } from '@/components/cowork-file-explorer';
 import { FileRow } from '@/components/cowork-open-file';
-import { TaskPageSkeleton } from '@/components/cowork-skeletons';
+import { FileListSkeleton, TaskPageSkeleton } from '@/components/cowork-skeletons';
 import { useCompanion } from '@/lib/companion-session';
 import { pillFocusKey, type FocusOrigin } from '@/lib/focus-return';
 import { classifyFolder, type DriveItem, type Project } from '@/lib/cowork-domain';
-import { normalizePath, type TaskFile, type TaskFolder } from '@/lib/cowork-discovery';
+import { normalizePath } from '@/lib/cowork-discovery';
 import { sectionHash, sectionLabels, type Section } from '@/lib/cowork-hash-routes';
 import { allFolderIds, buildRoleTree, fileType, flattenRoleFiles, isTextPreviewable, partitionTaskFiles, type OutputsView, type TreeFolderNode } from '@/lib/cowork-workspace';
 
@@ -21,23 +21,20 @@ function ProjectDot({ project }: { project?: Project }) { return <span aria-hidd
 
 export function TaskPage({ taskId, listSection, onBack, hasHistory, onCreateProject }: { taskId: string; listSection: Section; onBack: () => void; hasHistory: boolean; onCreateProject: (assignTo: string[], origin: FocusOrigin<HTMLElement>) => void }) {
   const session = useCompanion();
-  const { repositories, scopeKey, metadata, writable, update, markSeen, markAllSeen, layout, layoutQuery, summaryById, changes, observe, mode, setList, outputsView, setOutputsView, expanded, toggleFolder, setExpanded, fileLinks, confirmArchive } = session;
+  const { repositories, scopeKey, metadata, writable, update, markSeen, markAllSeen, layout, layoutQuery, summaryById, changes, mode, setList, outputsView, setOutputsView, expanded, toggleFolder, setExpanded, fileLinks, confirmArchive } = session;
   const summary = summaryById.get(taskId);
   const task = summary?.folder;
   const prefs = metadata.tasks[taskId] ?? {};
   const project = metadata.projects.find(p => p.id === prefs.projectId);
   const [preview, setPreview] = useState<DriveItem>();
-  // Deep inspection only when discovery skipped this task (beyond the per-refresh inspection cap).
-  const deep = useQuery({ queryKey: ['cowork', scopeKey, 'evidence', taskId], enabled: !!task && !summary?.inspected, retry: false, queryFn: async () => {
-    const page = await repositories.tasks.list(taskId);
-    const roles = page.items.filter(i => i.IsFolder && classifyFolder(i.Name) !== 'unclassified');
-    const children = await Promise.all(roles.map(async folder => ({ role: classifyFolder(folder.Name), page: await repositories.tasks.list(folder.Id) })));
-    const files: TaskFile[] = [...page.items.filter(i => !i.IsFolder).map(item => ({ item, role: 'unclassified' as const, relativePath: '' })), ...children.flatMap(c => c.page.items.filter(i => !i.IsFolder).map(item => ({ item, role: c.role, relativePath: item.Name ?? item.Id })))];
-    const folders: TaskFolder[] = children.flatMap(c => c.page.items.filter(i => i.IsFolder).map(item => ({ item, role: c.role, relativePath: item.Name ?? item.Id, parentRelativePath: '' })));
-    return { files, folders };
-  } });
-  useEffect(() => { if (deep.data) observe(deep.data.files.map(f => f.item)); }, [deep.data, observe]);
-  const source = summary?.inspected ? summary : deep.data;
+  // Opening a task is a priority-0 hydration in the sync engine: the task folder and its role folders are validated at the nearest
+  // boundary (unchanged leaf folders reused by fingerprint), deduplicated with any queued work, ≤3 connector calls in flight.
+  const { sync } = session;
+  useEffect(() => { if (task) void sync.hydrateTask(taskId); }, [sync, taskId, task]);
+  const taskIssues = useMemo(() => (layout?.issues ?? []).filter(i => task && normalizePath(i.path).toLowerCase().startsWith(normalizePath(task.Path).toLowerCase())), [layout, task]);
+  const inspecting = !!task && !summary?.inspected && taskIssues.length === 0;
+  const taskError = !!task && !summary?.inspected && taskIssues.find(i => i.scope === 'task');
+  const source = summary?.inspected ? summary : undefined;
   const files = partitionTaskFiles(source);
   useFileLinks(fileLinks, (source?.files ?? []).map(f => f.item));
   const outputTree = buildRoleTree(source?.files ?? [], source?.folders ?? [], 'output');
@@ -47,7 +44,7 @@ export function TaskPage({ taskId, listSection, onBack, hasHistory, onCreateProj
   const newOutputs = files.outputs.filter(o => isRecent(o.LastModified, 24));
   const backLabel = sectionLabels[listSection];
 
-  if (layoutQuery.isPending || (task && !source && deep.isPending)) return <TaskPageSkeleton />;
+  if (layoutQuery.isPending) return <TaskPageSkeleton />;
   if (layoutQuery.isError) return <div className="mx-auto w-full max-w-[1100px]"><ErrorState title="Couldn’t read the Cowork folder" description={layoutQuery.error instanceof Error ? layoutQuery.error.message : undefined} action={<Button asChild size="sm"><a href={sectionHash('tasks')}>Back to Tasks</a></Button>} className="fl-card py-8" /></div>;
   if (!task) return <div className="mx-auto w-full max-w-[1100px]"><EmptyState title="Task not found" description="This task folder is not in the last OneDrive read. It may have been moved or renamed, the link may be out of date, or the folder scope may have changed." action={<div className="flex flex-wrap justify-center gap-2"><Button asChild size="sm"><a href={sectionHash('tasks')}><ArrowLeft className="size-4" aria-hidden="true" />Back to Tasks</a></Button>{hasHistory && <Button size="sm" variant="outline" onClick={onBack}>Previous page</Button>}</div>} className="fl-card py-10" /></div>;
 
@@ -86,7 +83,8 @@ export function TaskPage({ taskId, listSection, onBack, hasHistory, onCreateProj
           <ViewToggle view={outputsView} onChange={setOutputsView} />
         </span>
       </div>
-      {deep.isError && <ErrorState title="Couldn’t read this task’s files" description={deep.error instanceof Error ? deep.error.message : undefined} action={<Button size="sm" onClick={() => void deep.refetch()}>Retry</Button>} className="fl-card py-6" />}
+      {taskError && <ErrorState title="Couldn’t read this task’s files" description={taskError.message} action={<Button size="sm" onClick={() => void sync.hydrateTask(taskId)}>Retry</Button>} className="fl-card py-6" />}
+      {inspecting && <FileListSkeleton rows={3} label="Inspecting this task’s folders in OneDrive" />}
       {source && <div className="fl-card overflow-hidden">
         {files.outputs.length === 0 ? <div className="flex min-h-11 items-center gap-2 px-3 py-2 text-xs text-muted-foreground"><FileOutput className="size-4 shrink-0" aria-hidden="true" /><span><span className="font-medium text-foreground">No outputs yet.</span> {summary?.roleFolders.some(f => classifyFolder(f.Name) === 'output') ? (outputTree.folders.length ? `The output folder has ${allFolderIds(outputTree).length} sub-folder${allFolderIds(outputTree).length === 1 ? '' : 's'} but no files in the last OneDrive read.` : 'The output folder exists but holds no files in the last OneDrive read.') : 'No output folder is present in this task folder yet; files written there will appear here, newest first.'}</span></div>
           : outputsView === 'flat'
@@ -97,6 +95,7 @@ export function TaskPage({ taskId, listSection, onBack, hasHistory, onCreateProj
 
     <section aria-labelledby="inputs-heading" className="space-y-1">
       <div className="flex flex-wrap items-center gap-2 px-1"><h2 id="inputs-heading" className="text-sm font-semibold text-muted-foreground">Inputs</h2><span className="text-xs text-muted-foreground">{files.inputs.length} file{files.inputs.length === 1 ? '' : 's'}</span></div>
+      {inspecting && <FileListSkeleton rows={2} />}
       {source && <div className="fl-card overflow-hidden">{files.inputs.length === 0 ? <p className="p-3 text-xs text-muted-foreground">No “input” or “inputs” folder files in this task.</p> : <ul className="divide-y">{flattenRoleFiles(source.files, 'input').map(entry => <FileRow key={entry.item.Id} item={entry.item} relativeDir={entry.relativeDir} links={fileLinks} metadata={metadata} changes={changes} writable={writable} onMarkSeen={markSeen} onPreview={isTextPreviewable(entry.item.Name) ? setPreview : undefined} />)}</ul>}</div>}
     </section>
 
@@ -111,7 +110,8 @@ export function TaskPage({ taskId, listSection, onBack, hasHistory, onCreateProj
       {previewQuery.isError && <p role="alert" className="mt-2 text-xs text-destructive">{previewQuery.error instanceof Error ? previewQuery.error.message : 'Unable to preview this file.'}</p>}
       {previewQuery.isSuccess && <pre className="mt-2 max-h-[60vh] overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted p-3 text-xs [overflow-wrap:anywhere]">{previewQuery.data}</pre>}
     </section>}
-    {layout && layout.issues.some(i => normalizePath(i.path).toLowerCase().startsWith(normalizePath(task.Path).toLowerCase())) && <p className="text-xs text-[var(--fl-warning)]">{layout.issues.filter(i => normalizePath(i.path).toLowerCase().startsWith(normalizePath(task.Path).toLowerCase())).map(i => `${i.path} — ${i.message}`).join(' · ')}</p>}
+    {source?.stale && <p role="status" className="text-xs text-muted-foreground">Showing the last inspected file list · checking this folder for changes…</p>}
+    {taskIssues.length > 0 && !taskError && <p className="text-xs text-[var(--fl-warning)]">{taskIssues.map(i => `${i.path} — ${i.message}`).join(' · ')}</p>}
   </div>;
 }
 

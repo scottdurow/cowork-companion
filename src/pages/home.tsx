@@ -18,6 +18,7 @@ import { appearanceLabels } from '@/lib/appearance';
 import { ActionStatus, ProjectPill } from '@/components/cowork-assign';
 import { visibleSelectionState } from '@/lib/cowork-assignment';
 import { SectionSkeleton, TaskListSkeleton } from '@/components/cowork-skeletons';
+import { SyncStatusSlot, agoShort } from '@/components/cowork-sync-status';
 import { TaskPage } from '@/pages/task';
 import { useHashRoute } from '@/lib/use-hash-route';
 import { useOverflowGuard } from '@/lib/overflow-guard';
@@ -68,7 +69,7 @@ export function HomePage() {
   useOverflowGuard(`${route.kind}:${route.kind === 'task' ? route.taskId : route.kind === 'section' ? route.section : ''}`);
   const confirm = useConfirm();
   const session = useCompanion();
-  const { mode, modeResolved, demoMode, setDemoMode, preferencesQuery, bootstrap, retryBootstrap, readiness, fileLinks, appearance, setAppearance, repositories, scopeKey, changes, index, observe, metadata, metadataQuery, metaToken, setMetaToken, save, initialize, writable, markSeen, createMetadata, path, setPath, interval, setInterval: setIntervalValue, layoutQuery, layout, summaryById, refresh, list, setList, selection, toggleSelection, selectVisible, deselectVisible, clearSelection, assign, createProject, pendingKey, lastResult } = session;
+  const { mode, modeResolved, demoMode, setDemoMode, preferencesQuery, bootstrap, retryBootstrap, readiness, fileLinks, appearance, setAppearance, repositories, scopeKey, changes, index, observe, metadata, metadataQuery, metaToken, setMetaToken, save, initialize, writable, markSeen, createMetadata, path, setPath, interval, setInterval: setIntervalValue, layoutQuery, layout, summaryById, refresh, sync, list, setList, selection, toggleSelection, selectVisible, deselectVisible, clearSelection, assign, createProject, pendingKey, lastResult } = session;
   const { search, taskFilter, projectFilter, sort, memoryFilter, activityUnseen } = list;
   const liveLocation = '/Documents/cowork-companion.json';
   const section: Section | undefined = route.kind === 'section' ? route.section : undefined;
@@ -148,6 +149,21 @@ export function HomePage() {
   const projectCounts = Object.fromEntries(metadata.projects.map(p => [p.id, Object.values(metadata.tasks).filter(t => t.projectId === p.id && !t.archived).length]));
   const archivedCount = Object.values(metadata.tasks).filter(t => t.archived).length;
   const showTasks = section === 'dashboard' || section === 'tasks' || section === 'archived';
+  // Progressive priorities: pinned + visible task shells are inspected first (bounded concurrency in the engine); Skills and
+  // Memory are discovered only when their route opens (or in the engine's low-priority idle slot) — the dashboard never waits for them.
+  const priorityIds = showTasks ? [...pinnedTasks, ...visibleTasks].slice(0, 40).map(i => i.Id).join('|') : '';
+  useEffect(() => { if (priorityIds) sync.prioritizeTasks(priorityIds.split('|')); }, [sync, priorityIds]);
+  useEffect(() => { if (layout && section === 'skills') void sync.ensureSkills(); }, [sync, layout, section]);
+  useEffect(() => { if (layout && section === 'memory') void sync.ensureMemory(); }, [sync, layout, section]);
+  const [rescanBusy, setRescanBusy] = useState<'rescan' | 'clear'>();
+  const runFullRescan = async () => {
+    if (rescanBusy || !(await confirm({ title: 'Rescan every Cowork folder?', description: 'Re-reads every task, skill and memory folder from OneDrive, ignoring the browser cache. Cached content stays visible while it runs; on a large folder this can take several minutes.', confirmLabel: 'Full rescan' }))) return;
+    setRescanBusy('rescan'); try { await sync.fullRescan(); } finally { setRescanBusy(undefined); }
+  };
+  const runClearCache = async () => {
+    if (rescanBusy || !(await confirm({ title: 'Clear cached data?', description: 'Removes the browser-side copy of folder metadata for this app and reads the Cowork folder again from scratch. Nothing in OneDrive changes.', confirmLabel: 'Clear cached data', destructive: true }))) return;
+    setRescanBusy('clear'); try { await sync.clearCache(); } finally { setRescanBusy(undefined); }
+  };
   const taskError = layoutQuery.error instanceof Error ? layoutQuery.error.message : 'Unable to read the Cowork folder.';
   const mutationError = save.error ?? initialize.error;
   const selectedProject = metadata.projects.find(p => p.id === projectFilter);
@@ -170,9 +186,8 @@ export function HomePage() {
         <div className="relative mx-auto hidden w-full max-w-md sm:block"><Search aria-hidden="true" className="pointer-events-none absolute left-2.5 top-2 size-4 text-muted-foreground" /><Input aria-label="Search tasks, projects, files, or skills" className="h-8 border-transparent bg-muted pl-8 focus-visible:border-input focus-visible:bg-card" placeholder="Search tasks, files, or projects…" value={search} onChange={e => setSearch(e.target.value)} /></div>
         <div className="ml-auto flex shrink-0 items-center gap-1">
           {mode === 'demo' && <span className="fl-badge fl-badge-warning shrink-0" title="Demo mode: built-in sample content held in memory. Nothing shown comes from OneDrive." aria-label="Demo mode: sample content, not OneDrive"><span className="sm:hidden">Demo</span><span className="hidden sm:inline">Demo mode · sample content</span></span>}
-          {layoutQuery.dataUpdatedAt > 0 && <span className="hidden text-xs text-muted-foreground md:block" title={modified(new Date(layoutQuery.dataUpdatedAt).toISOString())}>{ago(new Date(layoutQuery.dataUpdatedAt).toISOString(), 'Refreshed')}</span>}
-          <Button variant="ghost" size="icon-sm" className="fl-focus" aria-label={layoutQuery.isFetching ? 'Refreshing Cowork content' : 'Refresh Cowork content'} aria-busy={layoutQuery.isFetching || undefined} disabled={layoutQuery.isFetching} onClick={refresh}>{layoutQuery.isFetching ? <Spinner className="size-4" role="presentation" aria-label={undefined} aria-hidden="true" /> : <RefreshCw aria-hidden="true" className="size-4" />}</Button>
-          {layoutQuery.isFetching && !layoutQuery.isPending && <span role="status" aria-live="polite" className="sr-only">Refreshing Cowork content</span>}
+          {modeResolved && <span className="hidden md:block"><SyncStatusSlot status={sync.status} onRetry={refresh} /></span>}
+          <Button variant="ghost" size="icon-sm" className="fl-focus" aria-label={layoutQuery.isFetching ? 'Checking OneDrive for changes' : 'Check OneDrive for changes (incremental refresh)'} aria-busy={layoutQuery.isFetching || undefined} disabled={sync.status.phase !== 'idle'} onClick={refresh}>{layoutQuery.isFetching ? <Spinner className="size-4" role="presentation" aria-label={undefined} aria-hidden="true" /> : <RefreshCw aria-hidden="true" className="size-4" />}</Button>
           <Button asChild variant="ghost" size="icon-sm" className="fl-focus"><a href={sectionHash('settings')} aria-label="Settings" aria-current={section === 'settings' ? 'page' : undefined}><Settings aria-hidden="true" className="size-4" /></a></Button>
         </div>
       </div>
@@ -206,7 +221,7 @@ export function HomePage() {
         {route.kind === 'task' && <TaskPage key={route.taskId} taskId={route.taskId} listSection={listSection} onBack={back} hasHistory={hasHistory} onCreateProject={createFromPill} />}
         {route.kind === 'not-found' && <EmptyState title="Page not found" description={route.reason === 'malformed-task-id' ? 'This task link is malformed.' : `There is no “${route.hash.replace(/^#\//, '')}” section in Cowork Companion.`} action={<Button asChild size="sm"><a href={sectionHash('tasks')}><ArrowLeft className="size-4" aria-hidden="true" />Go to Tasks</a></Button>} className="fl-card py-10" />}
         {route.kind === 'section' && searchTerm.length >= 2 && <section aria-labelledby="search-heading" className="fl-card space-y-2 p-3">
-          <div className="flex flex-wrap items-center justify-between gap-2"><h2 id="search-heading" className="font-semibold">Search results for “{searchTerm}”</h2><Button size="xs" variant="ghost" className="fl-focus" onClick={() => setSearch('')}>Clear</Button></div>
+          <div className="flex flex-wrap items-center justify-between gap-2"><h2 id="search-heading" className="font-semibold">Search results for “{searchTerm}”</h2>{sync.status.pendingHydration > 0 && <span role="status" className="text-xs text-muted-foreground">Still indexing {sync.status.pendingHydration} task folder{sync.status.pendingHydration === 1 ? '' : 's'} — file matches may be incomplete</span>}<Button size="xs" variant="ghost" className="fl-focus" onClick={() => setSearch('')}>Clear</Button></div>
           <p className="text-xs text-muted-foreground">Matching tasks are filtered in the list below. Projects match companion settings. Filenames match the {index.size.toLocaleString()} items in the last OneDrive read{layout ? ` (${modified(layout.completedAt)})` : ''}.</p>
           <div className="flex flex-wrap gap-1">{metadata.projects.filter(p => p.name.toLowerCase().includes(searchTerm.toLowerCase())).map(project => <Button key={project.id} size="xs" variant="outline" className="fl-focus h-auto whitespace-normal" onClick={() => showProject(project.id)}><ProjectDot project={project} />{project.name}</Button>)}</div>
           {!localMatches.length && <EmptyState icon={Search} title="No filename matches in the last read" className="py-3" />}
@@ -227,7 +242,7 @@ export function HomePage() {
             <div className="flex flex-wrap items-center gap-2">
               <h2 id="tasks-heading" className="text-xl font-semibold tracking-tight">{section === 'archived' ? 'Archived' : selectedProject ? selectedProject.name : projectFilter === 'unassigned' ? 'Unassigned tasks' : 'Tasks'}</h2>
               {selectedProject && <ProjectDot project={selectedProject} />}
-              <span className="ml-auto text-xs text-muted-foreground" title={layoutQuery.dataUpdatedAt ? modified(new Date(layoutQuery.dataUpdatedAt).toISOString()) : undefined}>{layoutQuery.dataUpdatedAt > 0 ? `${visibleTasks.length} of ${currentFolders.length} tasks · last refresh ${new Date(layoutQuery.dataUpdatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : 'Not refreshed yet'}</span>
+              <span className="ml-auto flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"><span className="shrink-0">{visibleTasks.length} of {currentFolders.length} tasks</span><span aria-hidden="true">·</span><span className="md:hidden"><SyncStatusSlot status={sync.status} onRetry={refresh} /></span><span className="hidden md:inline" title={sync.status.lastSyncedAt ? modified(sync.status.lastSyncedAt) : undefined}>{sync.status.lastSyncedAt ? `synced ${agoShort(sync.status.lastSyncedAt)}` : 'not synced yet'}</span></span>
             </div>
             <div className="flex min-h-9 min-w-0 flex-wrap items-center gap-2" aria-busy={pendingKey === 'bulk-assign' || pendingKey === 'bulk-unassign' || undefined}>
               <Checkbox className="fl-focus ml-2" checked={selectionState === 'all' ? true : selectionState === 'some' ? 'indeterminate' : false} disabled={!visibleIds.length} onCheckedChange={() => selectionState === 'all' ? deselectVisible(visibleIds) : selectVisible(visibleIds)} aria-label={selectionState === 'all' ? `Deselect all ${visibleIds.length} visible tasks` : `Select all ${visibleIds.length} visible tasks`} />
@@ -286,8 +301,9 @@ export function HomePage() {
         </section>}
         {section === 'skills' && <section aria-labelledby="skills-heading" className="space-y-2">
           <div className="flex flex-wrap items-baseline justify-between gap-2"><h2 id="skills-heading" className="text-xl font-semibold tracking-tight">Skills</h2><span className="truncate text-xs text-muted-foreground">/Documents/Cowork/skills/{'{skill-name}'}/SKILL.md</span></div>
-          {(layoutQuery.isPending || !modeResolved) && <SectionSkeleton rows={3} />}{layoutQuery.isError && <ErrorState title={`Couldn’t read ${path}`} description={taskError} action={<Button size="sm" onClick={() => void layoutQuery.refetch()}>Retry</Button>} className="fl-card py-8" />}
-          {layout && <>
+          {(layoutQuery.isPending || !modeResolved || (layout && sync.status.skills === 'loading' && layout.skills.length === 0)) && <SectionSkeleton rows={3} label="Reading the skills folder from OneDrive" />}{layoutQuery.isError && <ErrorState title={`Couldn’t read ${path}`} description={taskError} action={<Button size="sm" onClick={() => void layoutQuery.refetch()}>Retry</Button>} className="fl-card py-8" />}
+          {layout && <SectionSyncLine state={sync.status.skills} error={sync.status.skillsError} syncedAt={sync.status.lastSyncedAt} noun="skills" onRetry={() => void sync.ensureSkills()} />}
+          {layout && (sync.status.skills !== 'loading' || layout.skills.length > 0) && <>
             {layout.containers.skills.length > 0 && <p className="text-xs text-muted-foreground">Skills container{layout.containers.skills.length === 1 ? '' : 's'}: {layout.containers.skills.map(c => normalizePath(c.Path) || c.Name).join(', ')} · {layout.skills.length} skill{layout.skills.length === 1 ? '' : 's'} with SKILL.md</p>}
             <ul aria-label="Skills" className="fl-card divide-y overflow-hidden">{layout.containers.skills.length === 0 ? <li className="list-none"><EmptyState icon={BookOpen} title="No skills folder found" description={`${path} has no folder named “skills” (any casing). Skills appear here once Cowork creates one; each skill is a folder containing SKILL.md.`} className="py-8" /></li> : !layout.skills.length && <li className="list-none"><EmptyState icon={BookOpen} title="No SKILL.md definitions found" description="The skills folder exists but no subfolder (searched 4 levels deep) contains a SKILL.md file." className="py-8" /></li>}{layout.skills.filter(s => `${s.folder.Name ?? ''} ${s.summary}`.toLowerCase().includes(search.toLowerCase())).map(skill => <SkillRow key={skill.folder.Id} skill={skill} metadata={metadata} changes={changes} onOpen={() => setSelected({ item: skill.folder, kind: 'skill' })} />)}</ul>
           </>}
@@ -295,8 +311,9 @@ export function HomePage() {
         {section === 'memory' && <section aria-labelledby="memory-heading" className="space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2"><h2 id="memory-heading" className="text-xl font-semibold tracking-tight">Memory &amp; config</h2>{layout && (layout.containers.memory.length + layout.containers.config.length) > 1 && <label className="flex items-center gap-1.5 text-xs text-muted-foreground">Folder<select aria-label="Memory and configuration folder" className="fl-focus h-7 max-w-full rounded-md border bg-card px-1.5 text-xs text-foreground" value={memoryFilter} onChange={e => setMemoryFilter(e.target.value)}><option value="all">All folders</option>{[...layout.containers.memory, ...layout.containers.config].map(c => <option key={c.Id} value={c.Id}>{normalizePath(c.Path) || c.Name}</option>)}</select></label>}</div>
           <p className="text-xs text-muted-foreground">Shows file names, timestamps and contents as stored. Whether a task or conversation uses a memory item is not observable here and is never implied.</p>
-          {(layoutQuery.isPending || !modeResolved) && <SectionSkeleton rows={3} />}{layoutQuery.isError && <ErrorState title={`Couldn’t read ${path}`} description={taskError} action={<Button size="sm" onClick={() => void layoutQuery.refetch()}>Retry</Button>} className="fl-card py-8" />}
-          {layout && <>
+          {(layoutQuery.isPending || !modeResolved || (layout && sync.status.memory === 'loading' && layout.memory.length === 0)) && <SectionSkeleton rows={3} label="Reading memory and configuration folders from OneDrive" />}{layoutQuery.isError && <ErrorState title={`Couldn’t read ${path}`} description={taskError} action={<Button size="sm" onClick={() => void layoutQuery.refetch()}>Retry</Button>} className="fl-card py-8" />}
+          {layout && <SectionSyncLine state={sync.status.memory} error={sync.status.memoryError} syncedAt={sync.status.lastSyncedAt} noun="memory and configuration files" onRetry={() => void sync.ensureMemory()} />}
+          {layout && (sync.status.memory !== 'loading' || layout.memory.length > 0) && <>
             {(layout.containers.memory.length + layout.containers.config.length) > 0 && <p className="text-xs text-muted-foreground">{[...layout.containers.memory, ...layout.containers.config].map(c => normalizePath(c.Path) || c.Name).join(', ')} · {layout.memory.length} file{layout.memory.length === 1 ? '' : 's'}{layout.memoryTruncated ? ' (list capped)' : ''}</p>}
             <ul aria-label="Memory and config files" className="fl-card divide-y overflow-hidden">{(layout.containers.memory.length + layout.containers.config.length) === 0 ? <li className="list-none"><EmptyState icon={Brain} title="No memory or config folder found" description={`${path} has no folder named “memory”, “memories”, “config” or “settings” (any casing). Files appear here once Cowork creates one.`} className="py-8" /></li> : !memoryEntries.length && <li className="list-none"><EmptyState icon={Brain} title="No files in this folder" className="py-8" /></li>}{memoryEntries.filter(e => (e.item.Name ?? '').toLowerCase().includes(search.toLowerCase())).map(({ item, container, kind }) => <li key={item.Id} className="fl-row grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-3 py-2"><FileText className="size-4 text-muted-foreground" aria-hidden="true" /><span className="min-w-0"><span className="flex items-center gap-2"><FileLink item={item} links={fileLinks} className="truncate font-medium" /><span className="fl-badge">{kind}</span><RecentState item={item} metadata={metadata} changes={changes} /></span><span className="block truncate text-xs text-muted-foreground" title={modified(item.LastModified)}>{ago(item.LastModified)} · {kb(item.Size)} · {normalizePath(parentPath(item.Path)) || normalizePath(container.Path) || container.Name}</span></span><Button size="xs" variant="ghost" className="fl-focus" aria-label={`Preview ${item.Name} as text`} onClick={() => setSelected({ item, kind: 'memory' })}>Preview</Button></li>)}</ul>
             {rootFiles.length > 0 && <div className="space-y-1"><h3 className="px-1 text-xs font-semibold text-muted-foreground">Files directly in {path}</h3><ul aria-label="Files in the Cowork root" className="fl-card divide-y overflow-hidden">{rootFiles.filter(i => (i.Name ?? '').toLowerCase().includes(search.toLowerCase())).map(item => <li key={item.Id} className="fl-row grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-3 py-2"><FileText className="size-4 text-muted-foreground" aria-hidden="true" /><span className="min-w-0"><span className="flex items-center gap-2"><FileLink item={item} links={fileLinks} className="truncate font-medium" /><RecentState item={item} metadata={metadata} changes={changes} /></span><span className="block text-xs text-muted-foreground" title={modified(item.LastModified)}>{ago(item.LastModified)} · {kb(item.Size)}</span></span><Button size="xs" variant="ghost" className="fl-focus" aria-label={`Preview ${item.Name} as text`} onClick={() => setSelected({ item, kind: 'memory' })}>Preview</Button></li>)}</ul></div>}
@@ -315,13 +332,27 @@ export function HomePage() {
               <dt className="font-medium">Tasks</dt><dd>{layout.tasks.length} folder{layout.tasks.length === 1 ? '' : 's'}{layout.tasks.length ? ` · ${layout.tasks.filter(t => t.inspected).length} inspected · ${layout.tasks.reduce((n, t) => n + t.inputs, 0)} input files · ${layout.tasks.reduce((n, t) => n + t.outputs, 0)} output files` : ''}</dd>
               <dt className="font-medium">Skills</dt><dd>{layout.containers.skills.length ? `${layout.skills.length} with SKILL.md` : 'no skills folder'}</dd>
               <dt className="font-medium">Memory/config</dt><dd>{layout.containers.memory.length + layout.containers.config.length ? `${layout.memory.length} files` : 'no memory or config folder'}</dd>
-              <dt className="font-medium">Last read</dt><dd>{modified(layout.completedAt)}{layout.issues.length ? ` · ${layout.issues.length} folder issue${layout.issues.length === 1 ? '' : 's'}` : ''}</dd>
+              <dt className="font-medium">Last sync</dt><dd>{sync.status.lastSyncedAt ? modified(sync.status.lastSyncedAt) : 'not yet'}{layout.issues.length ? ` · ${layout.issues.length} folder issue${layout.issues.length === 1 ? '' : 's'}` : ''}</dd>
             </dl>}
           </form>
           <div className="fl-card space-y-2 p-4">
             <h3 className="font-semibold">Refresh</h3>
             <Label htmlFor="refresh-interval">Automatic refresh</Label><select id="refresh-interval" className="fl-focus block h-8 rounded-md border bg-card px-2 text-sm" value={interval} onChange={e => setIntervalValue(Number(e.target.value))}><option value="0">Manual only</option><option value="60000">Every minute</option><option value="300000">Every 5 minutes</option><option value="900000">Every 15 minutes</option></select>
-            <p className="text-xs text-muted-foreground">Refresh re-reads folder metadata and keeps your current view, filters and selection.</p>
+            <p className="text-xs text-muted-foreground">Refresh is incremental: it re-reads the root and task listings and inspects only folders whose OneDrive metadata changed. Your view, filters and selection are kept.</p>
+          </div>
+          <div className="fl-card space-y-2 p-4">
+            <h3 className="font-semibold">Cached data</h3>
+            <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+              <dt className="font-medium">Where</dt><dd>{mode === 'demo' ? 'Session memory (Demo sample content is never cached in the browser)' : sync.status.cacheKind === 'indexeddb' ? 'This browser (IndexedDB), scoped to the Cowork root folder’s item ID' : 'Session memory only'}</dd>
+              <dt className="font-medium">Holds</dt><dd>Folder outline, per-task file metadata (names, IDs, sizes, timestamps, ETags), skill summaries and memory listings. No file contents, links or sign-in data.</dd>
+              <dt className="font-medium">Status</dt><dd><SyncStatusSlot status={sync.status} onRetry={refresh} /></dd>
+              {sync.status.cacheWarning && <><dt className="font-medium text-[var(--fl-warning)]">Note</dt><dd className="text-[var(--fl-warning)]">{sync.status.cacheWarning}</dd></>}
+            </dl>
+            <div className="flex min-h-8 flex-wrap items-center gap-2">
+              <Button size="sm" variant="outline" className="fl-focus" disabled={!!rescanBusy || !layout || sync.status.phase !== 'idle'} aria-busy={rescanBusy === 'rescan' || undefined} onClick={() => void runFullRescan()}>{rescanBusy === 'rescan' ? <Spinner className="size-3.5" role="presentation" aria-label={undefined} aria-hidden="true" /> : <RefreshCw className="size-3.5" aria-hidden="true" />}Full rescan</Button>
+              <Button size="sm" variant="outline" className="fl-focus" disabled={!!rescanBusy || !modeResolved} aria-busy={rescanBusy === 'clear' || undefined} onClick={() => void runClearCache()}>{rescanBusy === 'clear' ? <Spinner className="size-3.5" role="presentation" aria-label={undefined} aria-hidden="true" /> : <Trash2 className="size-3.5" aria-hidden="true" />}Clear cached data</Button>
+              <span className="text-xs text-muted-foreground">Full rescan ignores fingerprints and walks every folder (with progress); Clear removes the cache and starts over.</span>
+            </div>
           </div>
           <div className="fl-card space-y-2 p-4">
             <h3 className="font-semibold">Companion metadata</h3>
@@ -381,6 +412,16 @@ export function HomePage() {
   </div>;
 }
 
+/** One-line, fixed-height status for a lazily discovered section (Skills / Memory): cached · loading · ready · error+Retry. */
+function SectionSyncLine({ state, error, syncedAt, noun, onRetry }: { state: 'idle' | 'cached' | 'loading' | 'ready' | 'error'; error?: string; syncedAt?: string; noun: string; onRetry: () => void }) {
+  const text = state === 'loading' ? `Reading ${noun} from OneDrive…` : state === 'cached' ? `Showing cached ${noun}` : state === 'error' ? `Couldn’t read ${noun}${error ? ` · ${error}` : ''}` : state === 'ready' ? `${noun.charAt(0).toUpperCase()}${noun.slice(1)} checked ${agoShort(syncedAt) ?? 'just now'}` : '';
+  return <div className="flex h-5 min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+    {state === 'loading' && <Spinner className="size-3 shrink-0" role="presentation" aria-label={undefined} aria-hidden="true" />}
+    <span role="status" aria-live="polite" className={`truncate ${state === 'error' ? 'text-destructive' : ''}`}>{text}</span>
+    {(state === 'error' || state === 'cached') && <Button size="xs" variant="outline" className="fl-focus h-5 shrink-0 px-1.5" onClick={onRetry}>{state === 'error' ? 'Retry' : 'Check for changes'}</Button>}
+  </div>;
+}
+
 // Module-level (not nested in HomePage) so React keeps row DOM nodes across HomePage re-renders — focus and selection stay put.
 function TaskRow({ item, summary, metadata, changes, session, selected, onToggleSelection, onCreateProject, rememberScroll }: {
   item: DriveItem; summary?: TaskSummary; metadata: CompanionMetadata; changes: ChangeDetectionService; session: CompanionSession; selected: boolean;
@@ -402,7 +443,7 @@ function TaskRow({ item, summary, metadata, changes, session, selected, onToggle
       </span>
       <span className="hidden sm:block"><ProjectPill taskIds={[item.Id]} actionKey={`row:${item.Id}`} focusKey={pillFocusKey('row', item.Id)} metadata={metadata} session={session} onCreate={onCreateProject} /></span>
       <span className="hidden truncate text-xs text-muted-foreground sm:block" title={modified(item.LastModified)}>{ago(item.LastModified)}</span>
-      <span className="hidden min-w-0 items-center gap-1.5 text-xs sm:flex"><FileText className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />{!summary?.inspected ? <span className="truncate text-muted-foreground">Not inspected</span> : summary.roleFolders.length ? <span className="truncate" title={`${files} files · ${inputs} inputs · ${outputs} outputs${summary.partial ? ' · partial' : ''}`}><span className="font-medium">{files}</span><span className="text-muted-foreground"> · {inputs} in · {outputs} out{summary.partial ? ' · partial' : ''}</span></span> : <span className="truncate text-muted-foreground" title={files ? `${files} files, no input/output folders` : 'Empty folder'}>{files ? `${files} file${files === 1 ? '' : 's'}` : 'Empty'}</span>}</span>
+      <span className="hidden min-w-0 items-center gap-1.5 text-xs sm:flex"><FileText className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />{!summary?.inspected ? <span className="truncate text-muted-foreground" aria-busy="true" title="This task folder’s input/output counts are read in the background">Inspecting…</span> : summary.roleFolders.length ? <span className="truncate" title={`${files} files · ${inputs} inputs · ${outputs} outputs${summary.partial ? ' · partial' : ''}`}><span className="font-medium">{files}</span><span className="text-muted-foreground"> · {inputs} in · {outputs} out{summary.partial ? ' · partial' : ''}</span></span> : <span className="truncate text-muted-foreground" title={files ? `${files} files, no input/output folders` : 'Empty folder'}>{files ? `${files} file${files === 1 ? '' : 's'}` : 'Empty'}</span>}</span>
       <span className="flex items-center gap-0.5">
         <Button variant="ghost" size="icon-sm" className="fl-focus" disabled={!writable} aria-label={`${prefs.archived ? 'Restore' : 'Archive'} ${item.Name ?? 'task'}`} {...{ 'data-focus-return-key': `archive:row:${item.Id}` }} onClick={e => { if (prefs.archived) update(item.Id, { archived: false }); else void confirmArchive(item.Id, { node: e.currentTarget, key: `archive:row:${item.Id}` }); }}><Archive className="size-4 text-muted-foreground" aria-hidden="true" /></Button>
         <Button asChild variant="ghost" size="icon-sm" className="fl-focus"><a href={taskHash(item.Id)} aria-label={`Open task page for ${item.Name ?? 'task'}`} onClick={rememberScroll}><ChevronRight className="size-4 text-muted-foreground" aria-hidden="true" /></a></Button>

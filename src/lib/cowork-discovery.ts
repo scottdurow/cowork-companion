@@ -16,6 +16,8 @@ export interface TaskSummary {
   container?: DriveItem;
   inspected: boolean;
   partial: boolean;
+  /** Set by the sync engine when the folder fingerprint changed and a cached summary is shown until re-hydration completes. */
+  stale?: boolean;
   roleFolders: DriveItem[];
   files: TaskFile[];
   folders: TaskFolder[];
@@ -24,6 +26,9 @@ export interface TaskSummary {
   newestOutput?: DriveItem;
 }
 export interface SkillSummary { folder: DriveItem; definition?: DriveItem; summary: string; files: DriveItem[]; partial: boolean }
+/** Fingerprints from observable metadata only: ETag when present, else LastModified (+ size for files). */
+export function folderFingerprint(item: Pick<DriveItem, 'ETag' | 'LastModified'>) { return item.ETag ?? item.LastModified ?? ''; }
+export function fileFingerprint(item: Pick<DriveItem, 'ETag' | 'LastModified' | 'Size'>) { return `${item.ETag ?? item.LastModified ?? ''}|${item.Size ?? ''}`; }
 export interface MemoryEntry { item: DriveItem; container: DriveItem; kind: 'memory' | 'config' }
 export interface CoworkLayout {
   root: DriveItem;

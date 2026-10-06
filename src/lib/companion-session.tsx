@@ -15,6 +15,7 @@ import { FocusReturn, resolveFocusKey, type FocusOrigin } from '@/lib/focus-retu
 import { archiveRequest, assignRequest, runConfirmedMutation, type ConfirmedOutcome } from '@/lib/confirm-mutation';
 import { assignTasks, createProjectAndAssign, pruneSelection, toggleSelected, selectAll as selectAllIds, deselectAll as deselectAllIds } from '@/lib/cowork-assignment';
 import type { CoworkLayout, TaskSummary } from '@/lib/cowork-discovery';
+import { useSyncEngine, type LayoutState, type SyncHandle } from '@/lib/use-sync-engine';
 import { decodeListState, decodeOutputsView, defaultListState, encodeListState, toggleExpanded, type ListState, type OutputsView } from '@/lib/cowork-workspace';
 
 export type Mode = 'live' | 'demo';
@@ -77,10 +78,14 @@ export interface CompanionSession {
   setPath: (path: string) => void;
   interval: number;
   setInterval: (ms: number) => void;
-  layoutQuery: ReturnType<typeof useQuery<CoworkLayout>>;
+  /** Query-shaped view of the sync engine (cached → revalidating → live); pages keep reading isPending/isFetching/dataUpdatedAt. */
+  layoutQuery: LayoutState;
   layout?: CoworkLayout;
   summaryById: Map<string, TaskSummary>;
+  /** Incremental revalidation (outline + fingerprint diff) — never a whole-tree walk. */
   refresh: () => void;
+  /** OneDrive-first sync engine: status slot data, prioritisation, lazy sections, full rescan and cache clearing. */
+  sync: SyncHandle;
   list: ListState;
   setList: (patch: Partial<ListState>) => void;
   /** Outputs Tree/Flat choice and expanded folders, kept for the session across hash navigation and Back/Forward. */
@@ -144,9 +149,12 @@ export function CompanionProvider({ children, repositories: injected }: { childr
   const initialize = useMutation({ mutationFn: () => liveRepositories.metadata.initialize(emptyMetadata()), onSuccess: document => client.setQueryData<MetadataPage>(['cowork', 'live', 'metadata', undefined], { document }) });
   const writable = !!metadataQuery.data?.document && !save.isPending && !initialize.isPending && bootstrap.status !== 'creating' && !metadataQuery.isFetching;
 
-  // One discovery pass reads the whole observable layout. staleTime keeps page navigation from re-reading OneDrive.
-  const layoutQuery = useQuery({ queryKey: ['cowork', scopeKey, 'layout', path], queryFn: () => repositories.discovery.discover(path), retry: false, refetchInterval: interval || false, staleTime: interval || 300_000, refetchOnWindowFocus: false, enabled: modeResolved });
-  const layout = layoutQuery.data;
+  // OneDrive-first sync: cheap root authorization → cached layout (IndexedDB, scoped by root item id) → outline revalidation →
+  // prioritised, bounded (≤3 in flight) task hydration; Skills/Memory only when opened or idle. Demo uses a session-memory cache
+  // over the in-memory repository, so Demo still makes zero live content reads. Refresh is incremental; Full rescan lives in Settings.
+  const sync = useSyncEngine(repositories, { persistent: !injected && mode === 'live', path, enabled: modeResolved, intervalMs: interval });
+  const layoutQuery = sync.layoutQuery;
+  const layout = sync.layout;
   const summaryById = useMemo(() => new Map((layout?.tasks ?? []).map(t => [t.folder.Id, t])), [layout]);
   const observe = useCallback((items: DriveItem[]) => { changes.observe(items); setIndex(old => { const next = new Map(old); for (const item of items) next.set(item.Id, item); return next; }); }, [changes]);
   useEffect(() => { if (layout) observe(layout.observed); }, [layout, observe]);
@@ -265,11 +273,11 @@ export function CompanionProvider({ children, repositories: injected }: { childr
     return runConfirmedMutation(archiveRequest(taskName(taskId) ?? taskId), origin, { confirm, perform: () => runAction(`archive:${taskId}`, () => patchTask(metadata, taskId, { archived: true })), isBusy: () => !!pendingKey, focusReturn: mutationFocus, resolveByKey: k => resolveFocusKey(k), fallback: () => document.getElementById('companion-content'), defer: deferToFrame });
   }, [taskName, confirm, runAction, metadata, pendingKey, mutationFocus]);
 
-  const refresh = useCallback(() => { void client.invalidateQueries({ queryKey: ['cowork', scopeKey], predicate: q => !q.queryKey.includes('metadata') && !q.queryKey.includes('text') }); }, [client, scopeKey]);
+  const refresh = useCallback(() => { void sync.refresh(); void client.invalidateQueries({ queryKey: ['cowork', scopeKey], predicate: q => !q.queryKey.includes('metadata') && !q.queryKey.includes('text') && !q.queryKey.includes('layout') }); }, [sync, client, scopeKey]);
 
   const value: CompanionSession = {
     mode, modeResolved, demoMode, setDemoMode, preferencesQuery, bootstrap, retryBootstrap, readiness, repositories, scopeKey, changes, index, observe, metadata, metadataQuery, metaToken, setMetaToken, save, initialize, writable,
-    update, pendingKey, lastResult, runAction, assign, confirmAssign, confirmArchive, taskName, appearance, scheme, setAppearance, fileLinks, createProject, selection, toggleSelection, selectVisible, deselectVisible, clearSelection, markSeen, markAllSeen, createMetadata, path, setPath, interval, setInterval: setIntervalValue, layoutQuery, layout, summaryById, refresh, list, setList,
+    update, pendingKey, lastResult, runAction, assign, confirmAssign, confirmArchive, taskName, appearance, scheme, setAppearance, fileLinks, createProject, selection, toggleSelection, selectVisible, deselectVisible, clearSelection, markSeen, markAllSeen, createMetadata, path, setPath, interval, setInterval: setIntervalValue, layoutQuery, layout, summaryById, refresh, sync, list, setList,
     outputsView, setOutputsView, expanded, toggleFolder, setExpanded,
   };
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

@@ -60,3 +60,9 @@ export function TaskPageSkeleton({ label = 'Loading this task from the last OneD
     <section className="space-y-1"><div className="flex items-center gap-2 px-1"><Line w="w-14" h="h-3.5" /><Line w="w-12" /></div><div className="fl-card divide-y overflow-hidden">{Array.from({ length: skeletonSpec.inputRows }).map((_, i) => <FileRowSkeleton key={i} />)}</div></section>
   </LoadingRegion>;
 }
+
+/** File-row placeholders for a task whose folders are still being inspected (the page header stays real; only the lists wait). */
+export function FileListSkeleton({ rows = skeletonSpec.outputRows, label }: { rows?: number; label?: string }) {
+  const body = <div className="fl-card divide-y overflow-hidden">{Array.from({ length: rows }).map((_, i) => <FileRowSkeleton key={i} />)}</div>;
+  return label ? <LoadingRegion label={label}>{body}</LoadingRegion> : <div aria-hidden="true">{body}</div>;
+}
